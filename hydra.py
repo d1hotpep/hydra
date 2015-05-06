@@ -99,21 +99,23 @@ def password_generator():
 def input_loader():
     global iteration_count
 
-    done = False
-    for login in login_generator():
-        for password in password_generator():
-            input_queue.put((login, password))
+    try:
+        done = False
+        for login in login_generator():
+            for password in password_generator():
+                input_queue.put((login, password))
 
-            iteration_count += 1
-            if args.limit and iteration_count >= args.limit:
-                done = True
+                iteration_count += 1
+                if args.limit and iteration_count >= args.limit:
+                    done = True
+                    break
+            if done:
                 break
-        if done:
-            break
 
-    # load sentinal values into queue to terminate workers
-    for i in xrange(args.threads):
-        input_queue.put((None, None))
+    finally:
+        # load sentinal values into queue to terminate workers
+        for i in xrange(args.threads):
+            input_queue.put((None, None))
 
 
 class Hacker(Thread):
@@ -159,7 +161,30 @@ class Hacker(Thread):
         raise Exception('not implemented')
 
 
-class HTAccessHacker(Hacker):
+class HTTPHacker(Hacker):
+    @staticmethod
+    def getServiceName():
+        raise Exception('not implemented')
+
+    @classmethod
+    def add_parser(cls, parent_parser):
+        parser = parent_parser.add_parser(cls.getServiceName())
+        group = parser.add_mutually_exclusive_group()
+        group.set_defaults(method='POST')
+        group.add_argument('--get', dest='method', action='store_const', const='GET')
+        group.add_argument('--post', dest='method', action='store_const', const='POST')
+
+        parser.add_argument('--ssl', action='store_true')
+        parser.add_argument('--data', action='append', help='add form data')
+        parser.add_argument('--header', action='append', help='add header to request')
+        parser.add_argument('--cookie', action='append', help='add cookie to request')
+
+
+class HTAccessHacker(HTTPHacker):
+    @staticmethod
+    def getServiceName():
+        return 'htaccess'
+
     def init(self, args):
         self.success_str = args.get('success_str')
         self.fail_str = args.get('fail_str')
@@ -191,7 +216,10 @@ def monitor_worker():
     while True:
         time.sleep(2)
         count = iteration_count - input_queue.qsize()
-        pct = count * 100 / (login_count * password_count)
+        if login_count and password_count:
+            pct = count * 100 / (login_count * password_count)
+        else:
+            pct = 0
         time_str = format_timedelta(timedelta(seconds=(time.time() - start_time)), locale='en_US')
         stdout_queue.put('%d / %d  (%d%%) in %s' % (
             count, input_queue.qsize(), pct, time_str
@@ -205,7 +233,7 @@ def output_serializer():
         stdout_queue.task_done()
 
 
-def signal_handler(signum, frame):
+def abort_program(signum=None, frame=None):
     """  flush output and kill worker threads silently upon ^C  """
 
     # kill all of the worker threads
@@ -219,9 +247,10 @@ def signal_handler(signum, frame):
 def shutdown(exception=None):
     """  should only be called after receiving ^C  """
 
-    print
-    pct = iteration_count * 100 / (login_count * password_count)
-    print 'iterations: %d   (%d%%)' % (iteration_count, pct)
+    if iteration_count and login_count and password_count:
+        print
+        pct = iteration_count * 100 / (login_count * password_count)
+        print 'iterations: %d   (%d%%)' % (iteration_count, pct)
 
 
 def main():
@@ -261,6 +290,12 @@ def main():
     global args
     args = parser.parse_args()
 
+    # validate that input files exist
+    if args.login_file:
+        assert os.path.isfile(args.login_file)
+    if args.password_file:
+        assert os.path.isfile(args.password_file)
+
     # validate that server exists
     try:
         netloc = urlparse(args.server).netloc
@@ -275,7 +310,7 @@ def main():
     # return
 
     # in case the program bails early
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGINT, abort_program)
     atexit.register(shutdown)
 
     # start misc async helpers
