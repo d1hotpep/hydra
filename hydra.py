@@ -375,12 +375,16 @@ def main():
     atexit._exithandlers = []
 
     # print valid logins if we found any
+    exit_code = 1
     if not valid_logins.empty():
+        exit_code = 0
         if args.verbose:
             print
         while not valid_logins.empty():
             login, password = valid_logins.get()
             print "valid login: %s / %s" % (login, password)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
