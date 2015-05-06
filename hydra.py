@@ -535,6 +535,9 @@ def main():
 
     sys.exit(exit_code)
 
+# ./hydra.py -l admin -P passwords.dat 192.168.1.100 -t 1 -v htaccess
+# ./hydra.py -l admin -x 4:4:a http://10.1.10.1/login.asp http-form --data username=^USER^ --data pws=^PASS^ --fail 'enter login
+
 
 if __name__ == "__main__":
     main()
