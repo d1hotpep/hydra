@@ -202,6 +202,8 @@ class Hacker(Thread):
             try:
                 res = self.attempt(login, password)
             except:
+                if args.verbose > 1:
+                    raise
                 res = False
 
             if res:
@@ -262,7 +264,52 @@ class HTTPHacker(Hacker):
                     '%s:%d' % (port_parts.group('host'), args.port)
                 )
 
+        self.form_data = {}
+        if args.data:
+            for pair in '&'.join(args.data).split('&'):
+                if '=' not in pair:
+                    raise ValueError('invalid form data argument: ' + pair)
+                key, value = pair.split('=', 1)
+                self.form_data[key] = value
+
+        self.headers = {}
+        if args.header:
+            for pair in '&'.join(args.header).split('&'):
+                if '=' not in pair:
+                    raise ValueError('invalid form data argument: ' + pair)
+                key, value = pair.split('=', 1)
+                self.headers[key] = value
+
+        self.cookies = {}
+        if args.cookie:
+            for pair in '&'.join(args.cookie).split('&'):
+                if '=' not in pair:
+                    raise ValueError('invalid form data argument: ' + pair)
+                key, value = pair.split('=', 1)
+                self.cookies[key] = value
+
         self.server = server
+
+    def makeRequest(self, method, url, **kwargs):
+        params = {
+            'data': self.form_data,
+            'headers': self.headers,
+            'cookies': self.cookies,
+            'timeout': args.timeout,
+        }
+        params.update(kwargs)
+
+        if 'POST' == method:
+            fn = requests.post
+        elif 'GET' == method:
+            fn = requests.get
+        else:
+            raise ValueError('invalid method: ' + method)
+
+        res = fn(url, **params)
+        res.raise_for_status()
+
+        return res
 
 
 class HTAccessHacker(HTTPHacker):
@@ -287,11 +334,9 @@ class HTAccessHacker(HTTPHacker):
         if args.debug:
             return False
 
-        # make request
-        # res = requests.get(url)
-        res = requests.get(self.server, auth=(login, password))
+        res = self.makeRequest('GET', self.server, auth=(login, password))
 
-        if res.ok and 'Authorization required' not in res.text:
+        if 'Authorization required' not in res.text:
             return True
 
 
@@ -309,37 +354,76 @@ class HTTPFormHacker(HTTPHacker):
         group.add_argument('--get', dest='method', action='store_const', const='GET')
         group.add_argument('--post', dest='method', action='store_const', const='POST')
 
+        parser.add_argument('--fail', action='store_true', help='interpret html_str as failure message')
+        parser.add_argument('html_str')
+
         return parser
 
     def init(self):
-        pass
-        # self.success_str = args.get('success_str')
-        # self.fail_str = args.get('fail_str')
+        HTTPHacker.init(self)
 
-        # check for login / pass
-        # if '^USER^' not in 'a'
+        parts = urlparse(self.server)
+
+        # if POST request, move query string to form data
+        if 'POST' == args.method:
+            if parts.query:
+                for pair in parts.query.split('&'):
+                    if '=' not in pair:
+                        raise ValueError('invalid form data argument: ' + pair)
+                    key, value = pair.split('=', 1)
+
+                    if self.form_data.get(key):
+                        raise KeyError('url and --data both set key: ' + key)
+
+                    self.form_data[key] = value
+
+                self.server = self.server.replace('?%s' % parts.query, '')
+
+            if '^USER^' not in self.form_data.values():
+                raise ValueError('^USER^ token not specified')
+            if '^PASS^' not in self.form_data.values():
+                raise ValueError('^PASS^ token not specified')
+        else:
+            # check for login / pass
+            if '^USER^' not in self.server:
+                raise ValueError('^USER^ token not found in server arg: ' + self.server)
+            if '^PASS^' not in self.server:
+                raise ValueError('^PASS^ token not found in server arg: ' + self.server)
+
+        if args.fail:
+            self.success_str = None
+            self.fail_str = args.html_str
+        else:
+            self.success_str = args.html_str
+            self.fail_str = None
 
     def attempt(self, login, password):
-        url = self.server.replace('^USER^', login).replace('^PASS^', password)
-        params = {
-            # 'user': login,
-            # 'pws': password,
-        }
+        url = self.server
+        kwargs = {}
+
+        if 'POST' == args.method:
+            kwargs['data'] = {}
+            for k, v in self.form_data.items():
+                if '^USER^' == v:
+                    kwargs['data'][k] = login
+                elif '^PASS^' == v:
+                    kwargs['data'][k] = password
+                else:
+                    kwargs['data'][k] = v
+        else:
+            url = url.replace('^USER^', login).replace('^PASS^', password)
+
         if args.verbose:
-            self.log(url)
+            self.log('%s : %s @ %s' % (login, password, url))
         if args.debug:
             return False
 
-        if 'POST' == args.method:
-            res = requests.post(url, data=params)
-        else:
-            res = requests.get(url, data=params)
+        res = self.makeRequest(args.method, url, **kwargs)
 
-        if res.ok:
-            if self.success_str and self.success_str in res.text:
-                return True
-            if self.fail_str and self.fail_str not in res.text:
-                return True
+        if self.success_str and self.success_str in res.text:
+            return True
+        if self.fail_str and self.fail_str not in res.text:
+            return True
 
 
 def main():
@@ -349,6 +433,7 @@ def main():
     parser.add_argument('-v', '--verbose', action='count', default=0)
     parser.add_argument('-t', '--threads', type=int, default=16)
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--timeout', type=float, default=0.1, help='timeout for each request')
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-l', '--login')
@@ -397,13 +482,6 @@ def main():
     except:
         raise ValueError('invalid server: ' + args.server)
 
-    kwargs = {
-        # 'method': 'POST',
-        'server': args.server,
-        'netloc': netloc,
-        'path': '/login.asp',
-    }
-
     # in case the program bails early
     signal.signal(signal.SIGINT, abort_program)
     atexit.register(shutdown)
@@ -428,15 +506,6 @@ def main():
         name = 'hacker-%d' % i
         t = service_types[args.service](name=name)
         worker_threads.append(t)
-
-    # method = 'POST'
-    # server = '10.1.10.1'
-    # path = '/login.asp'
-    # success_str = ''
-    # fail_str = 'Please enter login information'
-
-    # server = '192.168.1.100'
-    # fail_str = 'Authorization required'
 
     # wait for the workers to finish
     while worker_threads:
