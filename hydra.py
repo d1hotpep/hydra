@@ -23,7 +23,8 @@ import time
 from datetime import timedelta
 from babel.dates import format_timedelta
 import socket
-from urlparse import urlparse
+from urlparse import urlparse, urlunparse
+import re
 
 
 args = None
@@ -163,23 +164,21 @@ def shutdown(exception=None):
 
 
 class Hacker(Thread):
-    @classmethod
-    def getServiceName(cls):
+    @staticmethod
+    def getServiceName():
         # return cls.__class__.__name__.split('Hacker', 1)[0].lower()
         return None
 
-    @classmethod
-    def addParser(cls, parent_parser):
-        pass
+    @staticmethod
+    def addParser(parser):
+        return parser
 
-    def __init__(self, args, **kwargs):
-        Thread.__init__(self, **kwargs)
-        self.server = args['server']
+    def __init__(self, *fargs, **kwargs):
+        Thread.__init__(self, *fargs, **kwargs)
+        # self.server = args.server
 
         if hasattr(self, 'init'):
-            self.init(args)
-        else:
-            self.args = args
+            self.init()
 
         self.setDaemon(True)
         self.start()
@@ -215,19 +214,55 @@ class Hacker(Thread):
 
 
 class HTTPHacker(Hacker):
-    @classmethod
-    def addParser(cls, parent_parser):
-        parser = parent_parser.add_parser(cls.getServiceName())
-
-        group = parser.add_mutually_exclusive_group()
-        group.set_defaults(method='POST')
-        group.add_argument('--get', dest='method', action='store_const', const='GET')
-        group.add_argument('--post', dest='method', action='store_const', const='POST')
-
+    @staticmethod
+    def addParser(parser):
         parser.add_argument('--ssl', action='store_true')
+        parser.add_argument('--port', type=int)
         parser.add_argument('--data', action='append', help='add form data')
         parser.add_argument('--header', action='append', help='add header to request')
         parser.add_argument('--cookie', action='append', help='add cookie to request')
+
+        return parser
+
+    def init(self):
+        server = args.server
+
+        url_parts = urlparse(server)
+        scheme = url_parts.scheme
+        port = url_parts.port
+
+        # correct for urls like: 192.168.1.100:10
+        if scheme and not url_parts.netloc:
+            scheme = None
+            port = url_parts.path.split('/')[0]
+
+        if scheme:
+            if scheme not in ['http', 'https']:
+                raise ValueError('invalid scheme, expected "http" or "https": ' + server)
+            if 'http' == scheme and args.ssl:
+                raise ValueError('ssl requested but specified http')
+        else:
+            if args.ssl:
+                server = 'https://' + server
+            else:
+                server = 'http://' + server
+
+        if args.port:
+            if port and (port != args.port):
+                raise ValueError('--port specified but url already contains port value: ' + server)
+
+            # see if a port was specified in the url
+            port_parts = re.match('https?://(?P<host>[^/:]+)(:(?P<port>:\d+))?/?', server)
+            if port_parts.group('port'):
+                if (port_parts.group('port') != args.port):
+                    raise ValueError('--port specified but url already contains port value: ' + server)
+            else:
+                server = server.replace(
+                    port_parts.group('host'),
+                    '%s:%d' % (port_parts.group('host'), args.port)
+                )
+
+        self.server = server
 
 
 class HTAccessHacker(HTTPHacker):
@@ -235,31 +270,76 @@ class HTAccessHacker(HTTPHacker):
     def getServiceName():
         return 'htaccess'
 
-    def init(self, args):
-        self.success_str = args.get('success_str')
-        self.fail_str = args.get('fail_str')
+    def init(self):
+        HTTPHacker.init(self)
+        server = self.server
+
+        parts = urlparse(server)
+        if parts.username or parts.password:
+            raise ValueError('url should not already have login info: ' + server)
+
+        self.url = server.replace(parts.netloc, '^USER^:^PASS^@' + parts.netloc)
 
     def attempt(self, login, password):
-        params = {
-            # 'user': login,
-            # 'pws': password,
-        }
-
-        # # res = requests.post('http://' + server + path, data=params)
-
-        url = 'http://%s:%s@%s' % (login, password, self.server)
         if args.verbose:
+            url = self.url.replace('^USER^', login).replace('^PASS^', password)
             self.log(url)
         if args.debug:
             return False
 
         # make request
-        res = requests.get(url, data=params)
+        # res = requests.get(url)
+        res = requests.get(self.server, auth=(login, password))
 
-        if self.success_str and self.success_str in res.text:
+        if res.ok and 'Authorization required' not in res.text:
             return True
-        elif self.fail_str and self.fail_str not in res.text:
-            return True
+
+
+class HTTPFormHacker(HTTPHacker):
+    @staticmethod
+    def getServiceName():
+        return 'http-form'
+
+    @staticmethod
+    def addParser(parser):
+        parser = HTTPHacker.addParser(parser)
+
+        group = parser.add_mutually_exclusive_group()
+        group.set_defaults(method='POST')
+        group.add_argument('--get', dest='method', action='store_const', const='GET')
+        group.add_argument('--post', dest='method', action='store_const', const='POST')
+
+        return parser
+
+    def init(self):
+        pass
+        # self.success_str = args.get('success_str')
+        # self.fail_str = args.get('fail_str')
+
+        # check for login / pass
+        # if '^USER^' not in 'a'
+
+    def attempt(self, login, password):
+        url = self.server.replace('^USER^', login).replace('^PASS^', password)
+        params = {
+            # 'user': login,
+            # 'pws': password,
+        }
+        if args.verbose:
+            self.log(url)
+        if args.debug:
+            return False
+
+        if 'POST' == args.method:
+            res = requests.post(url, data=params)
+        else:
+            res = requests.get(url, data=params)
+
+        if res.ok:
+            if self.success_str and self.success_str in res.text:
+                return True
+            if self.fail_str and self.fail_str not in res.text:
+                return True
 
 
 def main():
@@ -282,17 +362,16 @@ def main():
     parser.add_argument('server')
 
     service_parsers = parser.add_subparsers(dest='service')
-    # service_parsers.add_parser('htaccess')
-    service_parsers.add_parser('telnet')
-    service_parsers.add_parser('http-form')
+    # service_parsers.add_parser('telnet')
 
     # load services and their parsers
     service_types = {}
     for name, v in globals().items():
         if isinstance(v, types.TypeType) and issubclass(v, Hacker):
-            if v.getServiceName():
-                v.addParser(service_parsers)
-                service_types[v.getServiceName()] = v
+            service = v.getServiceName()
+            if service:
+                v.addParser(service_parsers.add_parser(service))
+                service_types[service] = v
 
     global args
     args = parser.parse_args()
@@ -307,11 +386,23 @@ def main():
     try:
         netloc = urlparse(args.server).netloc
         if not netloc:
-            netloc = args.server
+            # make sure it's an IP address
+            match = re.match('(?P<IP>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/.*)?', args.server)
+            # netloc = args.server.split('/')[0]  # grab ip address
+            if not match:
+                raise ValueError('invalid server: ' + args.server)
+            netloc = match.group('IP')
 
         netloc = socket.gethostbyname(netloc)
     except:
         raise ValueError('invalid server: ' + args.server)
+
+    kwargs = {
+        # 'method': 'POST',
+        'server': args.server,
+        'netloc': netloc,
+        'path': '/login.asp',
+    }
 
     # in case the program bails early
     signal.signal(signal.SIGINT, abort_program)
@@ -329,22 +420,13 @@ def main():
         t.setDaemon(True)
         t.start()
 
-    kwargs = {
-        # 'method': 'POST',
-        'server': netloc,
-        # 'server': '192.168.1.100',
-        'path': '/login.asp',
-        'success_str': None,
-        'fail_str': 'Authorization required',
-    }
-
     assert args.service in service_types
 
     # start the workers
     worker_threads = []
     for i in range(args.threads):
         name = 'hacker-%d' % i
-        t = service_types[args.service](kwargs, name=name)
+        t = service_types[args.service](name=name)
         worker_threads.append(t)
 
     # method = 'POST'
