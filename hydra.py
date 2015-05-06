@@ -11,7 +11,7 @@ import os
 import sys
 import argparse
 import requests
-from requests.exceptions import ConnectionError
+import types
 import string
 from itertools import product
 from Queue import Queue
@@ -118,7 +118,60 @@ def input_loader():
             input_queue.put((None, None))
 
 
+def monitor_worker():
+    while True:
+        time.sleep(2)
+        count = iteration_count - input_queue.qsize()
+        if login_count and password_count:
+            pct = count * 100 / (login_count * password_count)
+        else:
+            pct = 0
+        time_str = format_timedelta(timedelta(seconds=(time.time() - start_time)), locale='en_US')
+        stdout_queue.put('%d / %d  (%d%%) in %s' % (
+            count, input_queue.qsize(), pct, time_str
+        ))
+
+
+def output_serializer():
+    while True:
+        item = stdout_queue.get()
+        print item
+        stdout_queue.task_done()
+
+
+def abort_program(signum=None, frame=None):
+    """  flush output and kill worker threads silently upon ^C  """
+
+    # kill all of the worker threads
+    for thread in threading.enumerate():
+        thread.kill_received = True
+
+    stdout_queue.join()
+    sys.exit(1)
+
+
+def shutdown(exception=None):
+    """  should only be called after receiving ^C  """
+
+    if iteration_count and login_count and password_count:
+        print
+        pct = iteration_count * 100 / (login_count * password_count)
+        print 'iterations: %d   (%d%%)' % (iteration_count, pct)
+
+
+################################# Hacker Classes ##############################
+
+
 class Hacker(Thread):
+    @classmethod
+    def getServiceName(cls):
+        # return cls.__class__.__name__.split('Hacker', 1)[0].lower()
+        return None
+
+    @classmethod
+    def addParser(cls, parent_parser):
+        pass
+
     def __init__(self, args, **kwargs):
         Thread.__init__(self, **kwargs)
         self.server = args['server']
@@ -162,13 +215,10 @@ class Hacker(Thread):
 
 
 class HTTPHacker(Hacker):
-    @staticmethod
-    def getServiceName():
-        raise Exception('not implemented')
-
     @classmethod
-    def add_parser(cls, parent_parser):
+    def addParser(cls, parent_parser):
         parser = parent_parser.add_parser(cls.getServiceName())
+
         group = parser.add_mutually_exclusive_group()
         group.set_defaults(method='POST')
         group.add_argument('--get', dest='method', action='store_const', const='GET')
@@ -212,47 +262,6 @@ class HTAccessHacker(HTTPHacker):
             return True
 
 
-def monitor_worker():
-    while True:
-        time.sleep(2)
-        count = iteration_count - input_queue.qsize()
-        if login_count and password_count:
-            pct = count * 100 / (login_count * password_count)
-        else:
-            pct = 0
-        time_str = format_timedelta(timedelta(seconds=(time.time() - start_time)), locale='en_US')
-        stdout_queue.put('%d / %d  (%d%%) in %s' % (
-            count, input_queue.qsize(), pct, time_str
-        ))
-
-
-def output_serializer():
-    while True:
-        item = stdout_queue.get()
-        print item
-        stdout_queue.task_done()
-
-
-def abort_program(signum=None, frame=None):
-    """  flush output and kill worker threads silently upon ^C  """
-
-    # kill all of the worker threads
-    for thread in threading.enumerate():
-        thread.kill_received = True
-
-    stdout_queue.join()
-    sys.exit(1)
-
-
-def shutdown(exception=None):
-    """  should only be called after receiving ^C  """
-
-    if iteration_count and login_count and password_count:
-        print
-        pct = iteration_count * 100 / (login_count * password_count)
-        print 'iterations: %d   (%d%%)' % (iteration_count, pct)
-
-
 def main():
     parser = argparse.ArgumentParser(epilog=__doc__)
     parser.add_argument('-A', '--all', action='store_true', help='find all valid logins')
@@ -273,19 +282,17 @@ def main():
     parser.add_argument('server')
 
     service_parsers = parser.add_subparsers(dest='service')
-    service_parsers.add_parser('htaccess')
+    # service_parsers.add_parser('htaccess')
     service_parsers.add_parser('telnet')
+    service_parsers.add_parser('http-form')
 
-    form_parser = service_parsers.add_parser('http-form')
-    group = form_parser.add_mutually_exclusive_group()
-    group.set_defaults(method='POST')
-    group.add_argument('--get', dest='method', action='store_const', const='GET')
-    group.add_argument('--post', dest='method', action='store_const', const='POST')
-
-    form_parser.add_argument('--ssl', action='store_true')
-    form_parser.add_argument('--data', action='append', help='add form data')
-    form_parser.add_argument('--header', action='append', help='add header to request')
-    form_parser.add_argument('--cookie', action='append', help='add cookie to request')
+    # load services and their parsers
+    service_types = {}
+    for name, v in globals().items():
+        if isinstance(v, types.TypeType) and issubclass(v, Hacker):
+            if v.getServiceName():
+                v.addParser(service_parsers)
+                service_types[v.getServiceName()] = v
 
     global args
     args = parser.parse_args()
@@ -305,9 +312,6 @@ def main():
         netloc = socket.gethostbyname(netloc)
     except:
         raise ValueError('invalid server: ' + args.server)
-
-    # print args
-    # return
 
     # in case the program bails early
     signal.signal(signal.SIGINT, abort_program)
@@ -334,19 +338,13 @@ def main():
         'fail_str': 'Authorization required',
     }
 
-    worker_type = None
-    if args.service == 'htaccess':
-        worker_type = HTAccessHacker
-    elif args.server == 'http-form':
-        pass
-    else:
-        raise TypeError('invalid service type: ' + args.service)
+    assert args.service in service_types
 
     # start the workers
     worker_threads = []
     for i in range(args.threads):
         name = 'hacker-%d' % i
-        t = worker_type(kwargs, name=name)
+        t = service_types[args.service](kwargs, name=name)
         worker_threads.append(t)
 
     # method = 'POST'
