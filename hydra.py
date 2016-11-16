@@ -167,7 +167,6 @@ def shutdown(exception=None):
 class Hacker(Thread):
     @staticmethod
     def getServiceName():
-        # return cls.__class__.__name__.split('Hacker', 1)[0].lower()
         return None
 
     @staticmethod
@@ -179,8 +178,6 @@ class Hacker(Thread):
 
         if hasattr(self, 'init'):
             self.init()
-        # else:
-        #     self.server = args.server
 
         self.setDaemon(True)
         self.start()
@@ -501,10 +498,8 @@ def main():
 
     parser.add_argument('server')
 
-    service_parsers = parser.add_subparsers(dest='service')
-    # service_parsers.add_parser('telnet')
-
     # load services and their parsers
+    service_parsers = parser.add_subparsers(dest='service')
     service_types = {}
     for name, v in globals().items():
         if isinstance(v, types.TypeType) and issubclass(v, Hacker):
@@ -591,7 +586,7 @@ def main():
     sys.exit(exit_code)
 
 # ./hydra.py -l admin -P passwords.dat 192.168.1.100 -t 1 -v htaccess
-# ./hydra.py -l admin -x 4:4:a http://10.1.10.1/login.asp http-form --data username=^USER^ --data pws=^PASS^ --fail 'enter login
+# ./hydra.py -l admin -x 4:4:a http://10.1.10.1/login.asp http-form --data username=^USER^ --data pws=^PASS^ --fail 'enter login'
 
 
 if __name__ == "__main__":
